@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 from conllu import parse
+from transformers import BertTokenizer, BertModel
 from probes import BaselineModel,  TwoLayeredBaslineClassifier, TwoLayeredBERTClassifier, LinearBERTClassifier
 from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
@@ -55,7 +56,7 @@ args = parser.parse_args()
 
 
 #compute F1
-def evaluate(model,dataloader ):
+def evaluate(model, dataloader, criterion ):
     model.eval()
     total_acc, total_count = 0, 0
 
@@ -69,12 +70,13 @@ def evaluate(model,dataloader ):
     return total_acc/total_count
 
 
-def train_for_epoch(model, train_dataloader, valid_dataloader, optimizer, criterion, scheduler, save_model):
+def train_for_epoch(model, EPOCHS, train_dataloader, valid_dataloader, optimizer, criterion, scheduler, save_model):
     best_accuracy = 0
+    total_accu = None
     for epoch in range(1, EPOCHS + 1):
         epoch_start_time = time.time()
-        train(model, train_dataloader)
-        accu_val = evaluate(model, valid_dataloader)
+        train(model, train_dataloader, optimizer, criterion, scheduler)
+        accu_val = evaluate(model, valid_dataloader, criterion)
         if total_accu is not None and total_accu > accu_val:
             scheduler.step()
         else:
@@ -82,8 +84,8 @@ def train_for_epoch(model, train_dataloader, valid_dataloader, optimizer, criter
             if total_accu > best_accuracy:
                 print('{} Accuracy --> {}'.format(best_accuracy, total_accu))
                 best_accuracy = total_accu
-                save_model_at = save_model + layer
-                print('Saving model', save_model)
+                save_model_at = args.save_model + args.layer
+                print('Saving model at ', save_model_at)
                 torch.save(model.state_dict(),save_model_at)
                 
         print('-' * 59)
@@ -123,11 +125,11 @@ def train(model, dataloader, optimizer, criterion, scheduler):
             
 
 # parsing the english universal dependencies currentyl in conll format
-enud_train = open(enud_training_set_path,'r').read()
-enud_dev = open(enud_dev_set_path,'r').read()
-enud_test = open(enud_test_set_path,'r').read()
+enud_train = open(args.enud_training_set_path,'r').read()
+enud_dev = open(args.enud_dev_set_path,'r').read()
+enud_test = open(args.enud_test_set_path,'r').read()
 
-event_structure = pd.read_csv(event_structure_dataset, sep='\t')
+event_structure = pd.read_csv(args.event_structure_dataset, sep='\t')
 event_structure_train = event_structure[event_structure.Split == 'train']
 event_structure_dev = event_structure[event_structure.Split == 'dev']
 event_structure_test = event_structure[event_structure.Split == 'test']
@@ -180,12 +182,11 @@ BATCH_SIZE = args.batch_size # batch size for training
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.1)
-total_accu = None
 
 
-train_dataset = to_map_style_dataset(train_iter)
-dev_dataset = to_map_style_dataset(dev_iter)
-test_dataset = to_map_style_dataset(test_iter)
+train_dataset = to_map_style_dataset(iter(train_set))
+dev_dataset = to_map_style_dataset(iter(development_set))
+test_dataset = to_map_style_dataset(iter(test_iter))
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
                               shuffle=True, collate_fn=COLLATE_FUNCTION)
@@ -195,6 +196,7 @@ test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE,
                              shuffle=True, collate_fn=COLLATE_FUNCTION)
 
 train_for_epoch(model = args.model_name, 
+                EPOCHS = args.epochs,
                 train_dataloader = train_dataloader,
                 valid_dataloader = valid_dataloader, 
                 optimizer = optimizer , 
