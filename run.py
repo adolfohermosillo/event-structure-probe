@@ -1,5 +1,7 @@
+import argparse
 import time
-import torch 
+import torch
+import gc
 import numpy as np
 import pandas as pd
 import torch.nn as nn
@@ -8,17 +10,21 @@ from transformers import BertTokenizer, BertModel
 from probes import BaselineModel,  TwoLayeredBaslineClassifier, TwoLayeredBERTClassifier, LinearBERTClassifier
 from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 argp = argparse.ArgumentParser()
-argp.add_argument('model',
-    help="Specify the model to use",
-    choices=["baseline", "bert", "roberta"])
 
-argp.add_argument('probe',
+argp.add_argument('--model',
+    help="Specify the model to use",
+    default=None)
+
+argp.add_argument('--probe',
     help="Which probe to run ('Linear' or 'MLP')",
-    choices=["Linear", "MLP"])
+    default=None)
 
 argp.add_argument('--enud_training_set_path',
     help="Path to the English Universal Dependencies training set", default=None)
@@ -75,7 +81,7 @@ def train_for_epoch(model, EPOCHS, train_dataloader, valid_dataloader, optimizer
     total_accu = None
     for epoch in range(1, EPOCHS + 1):
         epoch_start_time = time.time()
-        train(model, train_dataloader, optimizer, criterion, scheduler)
+        train(model, train_dataloader, optimizer, criterion, scheduler,epoch)
         accu_val = evaluate(model, valid_dataloader, criterion)
         if total_accu is not None and total_accu > accu_val:
             scheduler.step()
@@ -84,21 +90,22 @@ def train_for_epoch(model, EPOCHS, train_dataloader, valid_dataloader, optimizer
             if total_accu > best_accuracy:
                 print('{} Accuracy --> {}'.format(best_accuracy, total_accu))
                 best_accuracy = total_accu
-                save_model_at = args.save_model + args.layer
+                save_model_at = args.model_path
                 print('Saving model at ', save_model_at)
                 torch.save(model.state_dict(),save_model_at)
-                
+
         print('-' * 59)
         print('| end of epoch {:3d} | time: {:5.2f}s | '
             'valid accuracy {:8.3f} '.format(epoch,
                                             time.time() - epoch_start_time,
                                             accu_val))
         print('-' * 59)
-  
+
+
   
     
-def train(model, dataloader, optimizer, criterion, scheduler):
-    
+def train(model, dataloader, optimizer, criterion, scheduler,epoch):
+
     model.train()
     total_acc, total_count = 0, 0
     log_interval = 500
@@ -122,6 +129,8 @@ def train(model, dataloader, optimizer, criterion, scheduler):
             start_time = time.time()
 
 
+    gc.collect()
+    torch.cuda.empty_cache() 
             
 
 # parsing the english universal dependencies currentyl in conll format
@@ -138,16 +147,16 @@ eng_ud_train = parse(enud_train)
 eng_ud_dev = parse(enud_dev)
 eng_ud_test = parse(enud_test)
 
-train_set = get_data(distributive_train, eng_ud_train)
-development_set = get_majority(get_data(distributive_dev, eng_ud_dev))
-test_set = get_majority(get_data(distributive_test, eng_ud_test))
-
+train_set = get_data(event_structure_train, eng_ud_train)
+development_set = get_majority(get_data(event_structure_dev, eng_ud_dev))
+test_set = get_majority(get_data(event_structure_test, eng_ud_test))
 
 
 train_iter = iter(train_set)
 num_class = len(set([label for (label, text) in train_iter]))
-vocab_size = len(vocab)
-emsize = 768
+
+
+
 
 if args.model == 'baseline':
     ###BUILDING BLOCKS BASELINE        
@@ -155,38 +164,46 @@ if args.model == 'baseline':
     vocab = build_vocab_from_iterator(yield_tokens(train_iter), specials=["<unk>"])
     vocab.set_default_index(vocab["<unk>"])
     text_pipeline = lambda x: vocab(tokenizer(x))
-    label_pipeline = lambda x: int(x) 
+    label_pipeline = lambda x: int(x)
     COLLATE_FUNCTION = collate_batch
-    
+    vocab_size =  len(vocab)
+    embed_dim = 768
     if args.probe == 'Linear':
         model = BaselineModel(vocab_size, embed_dim, num_class)
-        
+
     elif args.probe == 'MLP':
         model = TwoLayeredBaslineClassifier(vocab_size, embed_dim, num_class,event_space=64,)
+
+
         
-    
+
+
 elif args.model == 'bert':
     tokenizerBERT = BertTokenizer.from_pretrained(args.model_name)
     COLLATE_FUNCTION = collate_batchBERT
-    
+
     if args.probe == 'Linear':
-        model = LinearBERTClassifier(train_iter, num_class = num_class, event_space=64, embed_dim = 768) 
-        
+        model = LinearBERTClassifier(model_name = args.model_name, num_class = num_class,
+                                     hidden_layer =int( args.layer), embed_dim = 768)
+
+
     elif args.probe == 'MLP':
-        model = TwoLayeredBERTClassifier( train_iter , hidden_layer = args.layer, 
-                                            num_class = num_class, event_space=64, embed_dim = 768) 
-        
+        model = TwoLayeredBERTClassifier( model_name = args.model_name , hidden_layer =int (args.layer),
+                                            num_class = num_class, event_space=64, embed_dim = 768)
+
+
     
-LR = args.learning_rate #learning rate
-BATCH_SIZE = args.batch_size # batch size for training  
+LR =float( args.learning_rate) #learning rate
+BATCH_SIZE =int( args.batch_size) # batch size for training  
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.1)
 
 
+
 train_dataset = to_map_style_dataset(iter(train_set))
 dev_dataset = to_map_style_dataset(iter(development_set))
-test_dataset = to_map_style_dataset(iter(test_iter))
+test_dataset = to_map_style_dataset(iter(test_set))
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
                               shuffle=True, collate_fn=COLLATE_FUNCTION)
@@ -195,13 +212,12 @@ valid_dataloader = DataLoader(dev_dataset, batch_size=BATCH_SIZE,
 test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE,
                              shuffle=True, collate_fn=COLLATE_FUNCTION)
 
-train_for_epoch(model = args.model_name, 
-                EPOCHS = args.epochs,
+train_for_epoch(model = model.to(device),
+                EPOCHS =int (args.epochs),
                 train_dataloader = train_dataloader,
-                valid_dataloader = valid_dataloader, 
-                optimizer = optimizer , 
-                criterion = criterion, 
-                scheduler = scheduler , 
-                save_model = args.save_model)
-
+                valid_dataloader = valid_dataloader,
+                optimizer = optimizer ,
+                criterion = criterion,
+                scheduler = scheduler ,
+                save_model = args.model_path)
 
